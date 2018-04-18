@@ -2,8 +2,11 @@ import numpy as np
 import sklearn.metrics.cluster as cluster_metrics
 from scipy.io import loadmat
 from matplotlib.pyplot import *
+from sklearn import model_selection
 from sklearn.cluster import k_means
 from scipy.cluster.hierarchy import linkage, fcluster, dendrogram
+from scipy.stats.kde import gaussian_kde
+from sklearn.mixture import GaussianMixture
 
 def loadData():
     """Gets the data from a .mat file.
@@ -13,10 +16,39 @@ def loadData():
     mat_data = loadmat('./KidneyData.mat')
     attributeNames = [name[0] for name in mat_data['attributeNames'][0]]
     X = mat_data['X']
-    y = mat_data['y']
+    y = mat_data['y'].squeeze()
 
     return X, y, attributeNames
     
+def gausKernelDensity(X,width):
+    '''
+    GAUSKERNELDENSITY Calculate efficiently leave-one-out Gaussian Kernel Density estimate
+    Input: 
+      X        N x M data matrix
+      width    variance of the Gaussian kernel
+    
+    Output: 
+      density        vector of estimated densities
+      log_density    vector of estimated log_densities
+    '''
+    X = np.mat(np.asarray(X))
+    N,M = X.shape
+
+    # Calculate squared euclidean distance between data points
+    # given by ||x_i-x_j||_F^2=||x_i||_F^2-2x_i^Tx_j+||x_i||_F^2 efficiently
+    x2 = np.square(X).sum(axis=1)
+    D = x2[:,[0]*N] - 2*X.dot(X.T) + x2[:,[0]*N].T
+
+    # Evaluate densities to each observation
+    Q = np.exp(-1/(2.0*width)*D)
+    # do not take density generated from the data point itself into account
+    Q[np.diag_indices_from(Q)]=0
+    sQ = Q.sum(axis=1)
+    
+    density = 1/((N-1)*np.sqrt(2*np.pi*width)**M+1e-100)*sQ
+    log_density = -np.log(N-1)-M/2*np.log(2*np.pi*width)+np.log(sQ)
+    return np.asarray(density), np.asarray(log_density)
+
 def clusterplot(X, clusterid, centroids='None', y='None', covars='None'):
     '''
     CLUSTERPLOT Plots a clustering of a data set as well as the true class
@@ -237,3 +269,177 @@ def complexKClustering(X, y):
         xticks([]); yticks([])
 
     show()
+
+def GMMEM(X, y, attributeNames):
+
+    mat_data = loadmat('./KidneyData.mat')
+    X = mat_data['X']
+    y = mat_data['y'].squeeze()
+    attributeNames = [name[0] for name in mat_data['attributeNames'].squeeze()]
+
+    N, M = X.shape
+    # Number of clusters
+    K = 10
+    cov_type = 'full'       
+    # type of covariance, you can try out 'diag' as well
+    reps = 1                
+    # number of fits with different initalizations, best result will be kept
+    # Fit Gaussian mixture model
+    gmm = GaussianMixture(n_components=K, covariance_type=cov_type, n_init=reps).fit(X)
+    cls = gmm.predict(X)    
+    # extract cluster labels
+    cds = gmm.means_        
+    # extract cluster centroids (means of gaussians)
+    covs = gmm.covariances_
+    # extract cluster shapes (covariances of gaussians)
+    if cov_type.lower() == 'diag':
+        new_covs = np.zeros([K,M,M])    
+        
+        count = 0    
+        for elem in covs:
+            temp_m = np.zeros([M,M])
+            new_covs[count] = np.diag(elem)
+            count += 1
+
+        covs = new_covs
+    
+    # In case the number of features != 2, then a subset of features most be plotted instead.
+    figure(figsize=(14,9))
+    idx = [0,1] # feature index, choose two features to use as x and y axis in the plot
+    clusterplot(X[:,idx], clusterid=cls, centroids=cds[:,idx], y=y, covars=covs[:,idx,:][:,:,idx])
+    show()
+
+def AICBIC():
+
+    mat_data = loadmat('./KidneyData.mat')
+    X = mat_data['X']
+    y = mat_data['y'].squeeze()
+    attributeNames = [name[0] for name in mat_data['attributeNames'].squeeze()]
+
+    N, M = X.shape
+    # C = len(classNames)
+    # Normalize data
+    # X = stats.zscore(X)
+
+    # Range of K's to try
+    KRange = range(1,11)
+    T = len(KRange)
+
+    covar_type = 'full'     # you can try out 'diag' as well
+    reps = 3                # number of fits with different initalizations, best result will be kept
+
+    # Allocate variables
+    BIC = np.zeros((T,))
+    AIC = np.zeros((T,))
+    CVE = np.zeros((T,))
+
+    # K-fold crossvalidation
+    CV = model_selection.KFold(n_splits=10,shuffle=True)
+
+    for t,K in enumerate(KRange):
+            print('Fitting model for K={0}'.format(K))
+
+            # Fit Gaussian mixture model
+            gmm = GaussianMixture(n_components=K, covariance_type=covar_type, n_init=reps).fit(X)
+
+            # Get BIC and AIC
+            BIC[t,] = gmm.bic(X)
+            AIC[t,] = gmm.aic(X)
+
+            # For each crossvalidation fold
+            for train_index, test_index in CV.split(X):
+
+                # extract training and test set for current CV fold
+                X_train = X[train_index]
+                X_test = X[test_index]
+
+                # Fit Gaussian mixture model to X_train
+                gmm = GaussianMixture(n_components=K, covariance_type=covar_type, n_init=reps).fit(X_train)
+
+                # compute negative log likelihood of X_test
+                CVE[t] += -gmm.score_samples(X_test).sum()
+                
+
+    # Plot results
+
+    figure(1); 
+    plot(KRange, BIC,'-*b')
+    plot(KRange, AIC,'-xr')
+    plot(KRange, 2*CVE,'-ok')
+    legend(['BIC', 'AIC', 'Crossvalidation'])
+    xlabel('K')
+    show()
+
+def KernelDensity():
+    mat_data = loadmat('../Data/KidneyData.mat')
+    X = mat_data['X']
+    N, M = X.shape
+    # x = np.linspace(-10, 10, 50)
+    # X = np.empty((N,M))
+    m = np.array([1, 3, 6]); s = np.array([1, .5, 2])
+    c_sizes = np.random.multinomial(N, [1./3, 1./3, 1./3])
+    for c_id, c_size in enumerate(c_sizes):
+        X[c_sizes.cumsum()[c_id]-c_sizes[c_id]:c_sizes.cumsum()[c_id],:] = np.random.normal(m[c_id], np.sqrt(s[c_id]), (c_size,M))
+    X[-1,0]=-10 # added outlier
+
+
+    # Compute kernel density estimate
+    kde = gaussian_kde(X.ravel())
+
+    scores = kde.evaluate(X.ravel())
+    idx = scores.argsort()
+    scores.sort()
+
+    print('The index of the lowest density object: {0}'.format(idx[0]))
+
+    # Plot kernel density estimate
+    figure()
+    bar(range(20),scores[:20])
+    title('Outlier score')
+    show()
+
+
+def GaussianOptimalKernelDensity():
+    mat_data = loadmat('../Data/KidneyData.mat')
+    X = mat_data['X']
+    N, M = X.shape
+    # x = np.linspace(-10, 10, 50)
+    # X = np.empty((N,M))
+    m = np.array([1, 3, 6]); s = np.array([1, .5, 2])
+    c_sizes = np.random.multinomial(N, [1./3, 1./3, 1./3])
+    for c_id, c_size in enumerate(c_sizes):
+        X[c_sizes.cumsum()[c_id]-c_sizes[c_id]:c_sizes.cumsum()[c_id],:] = np.random.normal(m[c_id], np.sqrt(s[c_id]), (c_size,M))
+
+
+    # Estimate the optimal kernel density width, by leave-one-out cross-validation
+    widths = 2.0**np.arange(-10,10)
+    logP = np.zeros(np.size(widths))
+    for i,w in enumerate(widths):
+        f, log_f = gausKernelDensity(X, w)
+        logP[i] = log_f.sum()
+    val = logP.max()
+    ind = logP.argmax()
+
+    width=widths[ind]
+    print('Optimal estimated width is: {0}'.format(width))
+
+    # Estimate density for each observation not including the observation
+    # itself in the density estimate
+    density, log_density = gausKernelDensity(X, width)
+
+    # Sort the densities
+    i = (density.argsort(axis=0)).ravel()
+    density = density[i]
+
+    # Display the index of the lowest density data object
+    print('Lowest density: {0} for data object: {1}'.format(density[0],i[0]))
+
+    # Plot density estimate of outlier score
+    figure(1)
+    bar(range(20),density[:20].reshape(-1,))
+    title('Density estimate')
+    figure(2)
+    plot(logP)
+    title('Optimal width')
+    show()
+
